@@ -210,6 +210,82 @@
     (ok (meets-reserve-requirements asset-id))
 )
 
+;; Advanced audit function with comprehensive verification
+(define-public (perform-comprehensive-audit 
+    (asset-id uint) 
+    (reported-reserves uint) 
+    (merkle-root (buff 32))
+    (proof-hashes (list 10 (buff 32))))
+    (begin
+        ;; Verify auditor authorization
+        (let ((auditor-data (unwrap! (map-get? authorized-auditors { auditor: tx-sender }) 
+                                    err-unauthorized-auditor)))
+            (asserts! (get is-authorized auditor-data) err-unauthorized-auditor)
+        )
+        
+        ;; Verify asset exists and is active
+        (match (map-get? registered-assets { asset-id: asset-id })
+            asset-data
+            (begin
+                (asserts! (get is-active asset-data) err-invalid-asset)
+                
+                ;; Verify merkle proof for reserve authenticity
+                (let ((calculated-root (fold verify-merkle-step proof-hashes merkle-root))
+                      (audit-id (var-get next-audit-id))
+                      (current-ratio (calculate-reserve-ratio 
+                                      reported-reserves 
+                                      (get total-supply asset-data))))
+                    
+                    ;; Create comprehensive audit record
+                    (map-set audit-records
+                        { asset-id: asset-id, audit-id: audit-id }
+                        {
+                            auditor: tx-sender,
+                            reserve-amount: reported-reserves,
+                            supply-amount: (get total-supply asset-data),
+                            reserve-ratio: current-ratio,
+                            block-height: block-height,
+                            is-verified: (>= current-ratio min-reserve-ratio)
+                        }
+                    )
+                    
+                    ;; Update asset with audited reserves
+                    (map-set registered-assets
+                        { asset-id: asset-id }
+                        (merge asset-data { 
+                            reserve-amount: reported-reserves,
+                            last-audit-block: block-height 
+                        })
+                    )
+                    
+                    ;; Update auditor stats
+                    (let ((current-auditor-data (unwrap! (map-get? authorized-auditors { auditor: tx-sender })
+                                                        err-unauthorized-auditor)))
+                        (map-set authorized-auditors
+                            { auditor: tx-sender }
+                            (merge current-auditor-data { 
+                                audit-count: (+ (get audit-count current-auditor-data) u1) 
+                            }))
+                    )
+                    
+                    (var-set next-audit-id (+ audit-id u1))
+                    
+                    ;; Return comprehensive audit results
+                    (ok {
+                        audit-id: audit-id,
+                        reserve-ratio: current-ratio,
+                        is-compliant: (>= current-ratio min-reserve-ratio),
+                        reserves-verified: reported-reserves,
+                        total-supply: (get total-supply asset-data),
+                        audit-timestamp: block-height
+                    })
+                )
+            )
+            err-invalid-asset
+        )
+    )
+)
+
 ;; Helper function for merkle proof verification
 (define-private (verify-merkle-step (proof-hash (buff 32)) (current-hash (buff 32)))
     (sha256 (concat current-hash proof-hash))
